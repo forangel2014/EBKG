@@ -33,7 +33,7 @@ class Config():
                 #pad_token_id=0,
                 #type_vocab_size=2,
                 #vocab_size=30522,
-                train_method='nce',
+                train_method='conditional_nce',
                 negative_sample_num = 3,
                 valid_num = 10,
                 lr = 1e-6,
