@@ -204,7 +204,7 @@ class EnergyBasedKGModel(torch.nn.Module):
         for i in range(input_tensor.shape[1]):
             encoded_id = self.generator_tokenizer.encode(sentence, return_tensors="pt")
             repr_vec = self.get_repr_vec(self.generator_model, encoded_id)[i,:]
-            q_distribution = F.softmax(self.generator_linear(repr_vec))
+            q_distribution = F.softmax(repr_vec)
             q *= q_distribution(input_tensor[i])
             sample_token = self.generator_tokenizer.decode(input_tensor[i])
             sentence += ' ' + sample_token
