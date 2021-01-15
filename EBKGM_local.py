@@ -10,22 +10,26 @@ import torch
 from torch import optim
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from transformers import BertConfig
-from transformers import BertModel
-from transformers import BertTokenizer
+from transformers import BertConfig, BertTokenizer, BertModel
+from transformers import GPT2Config, GPT2Tokenizer, GPT2LMHeadModel
 from metric import evaluate
 
 class TripleDataSet():
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, load):
         self.data_dir = data_dir
+        self.load = load
         self.entity_file = os.path.join(data_dir, 'all_entities.txt')
         self.relation_file = os.path.join(data_dir, 'all_relations.txt')
         self.train_triple_file = os.path.join(data_dir, 'train_triples.txt')
         self.valid_triple_file = os.path.join(data_dir, 'valid_triples.txt')
         self.test_triple_file = os.path.join(data_dir, 'test_triples.txt')
-        self.entity_dict = self.build_LUT(self.entity_file)
-        self.relation_dict = self.build_LUT(self.relation_file)
+        self.train_triple_text_file = os.path.join(data_dir, 'train_triples_text.txt')
+        self.valid_triple_text_file = os.path.join(data_dir, 'valid_triples_text.txt')
+        self.test_triple_text_file = os.path.join(data_dir, 'test_triples_text.txt')
+        if not self.load:
+            self.entity_dict = self.build_LUT(self.entity_file)
+            self.relation_dict = self.build_LUT(self.relation_file)
 
     def build_LUT(self, file):
         lut = {}
@@ -37,35 +41,61 @@ class TripleDataSet():
         return lut
 
     def build_train_set(self):
-        with open(self.train_triple_file, 'r', encoding='UTF-8') as f:
-            all_triples = f.readlines()
-            triple_num = len(all_triples)
-            dataset = []
-            for triple in all_triples:
-                triple = re.split('[\t\n]', triple)
-                try:
-                    text_h = self.entity_dict[triple[0]]
-                    text_r = self.relation_dict[triple[1]]
-                    text_t = self.entity_dict[triple[2]]
-                except:
-                    continue
-                dataset.append([text_h, text_r, text_t])
+        if not self.load:
+            with open(self.train_triple_file, 'r', encoding='UTF-8') as f:
+                all_triples = f.readlines()
+                triple_num = len(all_triples)
+                dataset = []
+                for triple in all_triples:
+                    triple = re.split('[\t\n]', triple)
+                    try:
+                        text_h = self.entity_dict[triple[0]]
+                        text_r = self.relation_dict[triple[1]]
+                        text_t = self.entity_dict[triple[2]]
+                    except:
+                        continue
+                    dataset.append([text_h, text_r, text_t])
+            with open(self.train_triple_text_file, 'w', encoding='UTF-8') as f:
+                for line in dataset:
+                    string = line[0] + '\t' + line[1] + '\t' + line[2] + '\n'
+                    f.writelines(string)
+        else:
+            with open(self.train_triple_text_file, 'r', encoding='UTF-8') as f:
+                all_triples = f.readlines()
+                triple_num = len(all_triples)
+                dataset = []
+                for triple in all_triples:
+                    triple = re.split('[\t\n]', triple)
+                    dataset.append([triple[0], triple[1], triple[2]])
         return dataset
 
     def build_valid_set(self):
-        with open(self.valid_triple_file, 'r', encoding='UTF-8') as f:
-            all_triples = f.readlines()
-            triple_num = len(all_triples)
-            dataset = []
-            for triple in all_triples:
-                triple = re.split('[\t \n]', triple)
-                try:
-                    text_h = self.entity_dict[triple[0]]
-                    text_r = self.relation_dict[triple[1]]
-                    text_t = self.entity_dict[triple[2]]
-                except:
-                    continue
-                dataset.append([text_h, text_r, text_t])
+        if not self.load:
+            with open(self.valid_triple_file, 'r', encoding='UTF-8') as f:
+                all_triples = f.readlines()
+                triple_num = len(all_triples)
+                dataset = []
+                for triple in all_triples:
+                    triple = re.split('[\t \n]', triple)
+                    try:
+                        text_h = self.entity_dict[triple[0]]
+                        text_r = self.relation_dict[triple[1]]
+                        text_t = self.entity_dict[triple[2]]
+                    except:
+                        continue
+                    dataset.append([text_h, text_r, text_t])
+            with open(self.valid_triple_text_file, 'w', encoding='UTF-8') as f:
+                for line in dataset:
+                    string = line[0] + '\t' + line[1] + '\t' + line[2] + '\n'
+                    f.writelines(string)
+        else:
+            with open(self.valid_triple_text_file, 'r', encoding='UTF-8') as f:
+                all_triples = f.readlines()
+                triple_num = len(all_triples)
+                dataset = []
+                for triple in all_triples:
+                    triple = re.split('[\t\n]', triple)
+                    dataset.append([triple[0], triple[1], triple[2]])
         return dataset
 
 class TorchTripleDataset(Dataset):
@@ -98,8 +128,8 @@ class Config():
                 #type_vocab_size=2,
                 #vocab_size=30522,
                 train_method='nce',
-                n = 3,
-                k = 7,
+                n = 1,
+                k = 9,
                 valid_num = 10,
                 lr = 1e-6,
                 weight_decay = 0,
@@ -121,17 +151,22 @@ class EnergyBasedKGModel(torch.nn.Module):
         super(EnergyBasedKGModel, self).__init__()
         self.is_trained = False
         self.config = config
-        #tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         #generator
-        self.generator_name = "bert-base-uncased"#"albert-base-v1"#
-        self.generator_config = BertConfig.from_pretrained(self.generator_name)
-        self.generator_model = BertModel.from_pretrained(self.generator_name)
-        self.generator_linear = torch.nn.Linear(self.generator_config.hidden_size, self.config.vocab_size)
+        self.generator_name = "gpt2"#"albert-base-v1"#
+        self.generator_config = GPT2Config.from_pretrained(self.generator_name)
+        self.generator_tokenizer = GPT2Tokenizer.from_pretrained(self.generator_name)
+        special_tokens_dict = {'bos_token': '[BOS]', 'cls_token': '[CLS]', 'eos_token': '[EOS]'}
+        self.generator_tokenizer.add_special_tokens(special_tokens_dict)
+        self.generator_model = GPT2LMHeadModel.from_pretrained(self.generator_name)
+        self.generator_model.resize_token_embeddings(len(self.generator_tokenizer))
+        #self.generator_linear = torch.nn.Linear(self.generator_config.hidden_size, self.config.vocab_size)
         #discriminator
         self.discriminator_name = "bert-base-uncased"#"albert-base-v1"#
         self.discriminator_config = BertConfig.from_pretrained(self.discriminator_name)
+        self.discriminator_tokenizer = BertTokenizer.from_pretrained(self.discriminator_name)
+        self.discriminator_tokenizer.add_special_tokens(special_tokens_dict)
         self.discriminator_model = BertModel.from_pretrained(self.discriminator_name)
+        self.discriminator_model.resize_token_embeddings(len(self.discriminator_tokenizer))
         self.discriminator_linear = torch.nn.Linear(self.discriminator_config.hidden_size, 1)
         #initialize
         self.train_mode()
@@ -148,82 +183,74 @@ class EnergyBasedKGModel(torch.nn.Module):
 
     def generate(self):
         sentence = '[CLS]'
-        sep_num = 0
         sample_token = None
         q = 1
-        for i in range(self.generator_config.max_positional_embeddings):
-            if (sample_token == '[SEP]' and sep_num == 3):
+        for i in range(self.generator_config.vocab_size):
+            if (sample_token == '[PAD]'):
                 break
-            encoded_id = self.tokenizer.encode(sentence)
-            repr_vec = self.get_repr_vec(self.generator, encoded_id)[i,:]
-            q_distribution = F.softmax(self.generator_linear(repr_vec))
+            encoded_id = self.generator_tokenizer.encode(sentence, return_tensors="pt")
+            repr_vec = self.get_repr_vec(self.generator_model, encoded_id)[i,:]
+            q_distribution = F.softmax(repr_vec)
             id_sample = self.sample(q_distribution)
-            q *= q_distribution(id_sample)
-            sample_token = self.tokenizer.convert_ids_to_tokens(id_sample)
-            if (sample_token == '[SEP]'):
-                sep_num += 1
+            q *= q_distribution[id_sample]
+            sample_token = self.generator_tokenizer.decode(id_sample)
             sentence += ' ' + sample_token
-
-        self.tokenizer.convert_ids_to_tokens(sentence)
+        #sentence = self.generator_tokenizer.decode(sentence)
         return sentence, q
     
-    def generate_q(self, input_seq):
+    def generate_q(self, input_tensor):
         sentence = '[CLS]'
         q = 1
-        for i in range(1,len(input_seq)):
-            encoded_id = self.tokenizer.encode(sentence)
-            repr_vec = self.get_repr_vec(self.generator, encoded_id)[i,:]
+        for i in range(input_tensor.shape[1]):
+            encoded_id = self.generator_tokenizer.encode(sentence, return_tensors="pt")
+            repr_vec = self.get_repr_vec(self.generator_model, encoded_id)[i,:]
             q_distribution = F.softmax(self.generator_linear(repr_vec))
-            q *= q_distribution(input_seq[i])
-            sample_token = self.tokenizer.convert_ids_to_tokens(input_seq[i])
+            q *= q_distribution(input_tensor[i])
+            sample_token = self.generator_tokenizer.decode(input_tensor[i])
             sentence += ' ' + sample_token
-
-        self.tokenizer.convert_ids_to_tokens(sentence)
         return q
 
     def get_repr_vec(self, model, x):
-        bert_output = model(x)
-        repr_vec = bert_output.last_hidden_state #1*3*768
+        model_output = model(x)
+        repr_vec = model_output[0][0,:,:] #1*3*768
         return repr_vec
 
     def sample(self, q):
         rand = random.random()
         q = q.cpu().detach().numpy()
-        for i in range(self.config.vocab_size):
+        for i in range(len(q)):
             rand -= q[i]
             if (rand <= 0):
                 return i
 
-    def discriminate(self, seq):
-        repr_vec = self.get_repr_vec(self.discriminator_model, seq)
+    def discriminate(self, tensor):
+        repr_vec = self.get_repr_vec(self.discriminator_model, tensor)
         E = self.discriminator_linear(repr_vec[0,:])
         p_hat = torch.exp(-E)
         return p_hat
 
-    def forward(self, input_seq):
+    def forward(self, input_triple):
         n = self.config.n
         k = self.config.k
         Pc0 = n/(n+k)
         rand = random.random()
         if (rand < Pc0):
-            p_hat = self.discriminate(input_seq)
-            q = self.generate_q(input_seq)
-            loss = -torch.log(n*p_hat/(n*p_hat+k*q)) 
+            input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
+            p_hat = self.discriminate(input_tensor)
+            input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
+            q = self.generate_q(input_tensor)
+            loss = -torch.log(n*p_hat/(n*p_hat+k*q))
         else:
+            input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
             generate_seq, q = self.generate()
-            p_hat = self.discriminate(generate_seq)
+            generate_tensor = self.discriminator_tokenizer.encode(generate_seq, return_tensors="pt")
+            p_hat = self.discriminate(generate_tensor)
             loss = -torch.log(k*q/(n*p_hat+k*q))
         return loss
 
-    def look_up(self, triple, q_h, q_r, q_t):
-        q_h = q_h[triple[0][0]]
-        q_r = q_r[triple[0][1]]
-        q_t = q_t[triple[0][2]]
-        return q_h, q_r, q_t
-
-    def triple2seq(self, triple):
-        text = '[CLS] ' + triple[0] + ' [SEP] ' + triple[1] + ' [SEP] ' + triple[2] + ' [SEP]'
-        seq = torch.tensor(self.tokenizer.encode(text))
+    def triple2tensor(self, tokenizer, triple):
+        text = '[BOS] ' + triple[0] + ' [CLS] ' + triple[1] + ' [CLS] ' + triple[2] + ' [EOS]'
+        seq = tokenizer.encode(text, return_tensors="pt")
         return seq
 
     def train_and_eval(self, trainset, validset):
@@ -237,12 +264,10 @@ class EnergyBasedKGModel(torch.nn.Module):
                 optimizer.zero_grad()
                 for i in range(self.config.batchsize):
                     triple = trainset[b*self.config.batchsize+i]
-                    seq = self.triple2seq(triple)
-                    input_tensor = seq.view([1, len(seq)])
                     if (i == 0):
-                        loss = self(input_tensor)
+                        loss = self(triple)
                     else:
-                        loss += self(input_tensor)
+                        loss += self(triple)
 
                 loss.backward()
                 optimizer.step()
@@ -270,14 +295,14 @@ class EnergyBasedKGModel(torch.nn.Module):
             pair.append([id_true, id_pred])
         result = evaluate(pair)
         logging.info(result)
-        #model.module.train_mode()  
+        #model.module.train_mode()
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--model-dir", required=True)
     args = parser.parse_args()
-    tripleDataSet = TripleDataSet(data_dir=args.data_dir)
+    tripleDataSet = TripleDataSet(data_dir=args.data_dir, load=True)
     trainset = tripleDataSet.build_train_set()
     validset = tripleDataSet.build_valid_set()
 
