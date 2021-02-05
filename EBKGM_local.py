@@ -111,33 +111,19 @@ class TorchTripleDataset(Dataset):
 
 class Config():
     def __init__(self,
-                vocab_size=16296,
-                #attention_probs_dropout_prob=0.1,
-                #gradient_checkpointing=False,
-                #hidden_act="gelu",
-                #hidden_dropout_prob=0.1,
-                #hidden_size= 768,
-                #initializer_range=0.02,
-                #intermediate_size=3072,
-                #layer_norm_eps=1e-12,
-                #max_position_embeddings=512,
-                #model_type="bert",
-                #num_attention_heads=12,
-                #num_hidden_layers=12,
-                #pad_token_id=0,
-                #type_vocab_size=2,
-                #vocab_size=30522,
-                train_method='nce',
-                n = 1,
-                k = 9,
+                vocab_size = 16296,
+                train_method = 'nce',
+                task = 'tail enetity prediction',
+                n = 3,
+                k = 7,
                 valid_num = 10,
                 lr = 1e-6,
                 weight_decay = 0,
-                batchsize = 10,
+                batchsize = 1,
                 epoch = 10):
         self.vocab_size=vocab_size
-        #self.bert_config = bert_config
         self.train_method = train_method
+        self.task = task
         self.n = n
         self.k = k
         self.valid_num = valid_num
@@ -151,23 +137,39 @@ class EnergyBasedKGModel(torch.nn.Module):
         super(EnergyBasedKGModel, self).__init__()
         self.is_trained = False
         self.config = config
+
         #generator
-        self.generator_name = "gpt2"#"albert-base-v1"#
-        self.generator_config = GPT2Config.from_pretrained(self.generator_name)
-        self.generator_tokenizer = GPT2Tokenizer.from_pretrained(self.generator_name)
-        special_tokens_dict = {'bos_token': '[BOS]', 'cls_token': '[CLS]', 'eos_token': '[EOS]'}
-        self.generator_tokenizer.add_special_tokens(special_tokens_dict)
-        self.generator_model = GPT2LMHeadModel.from_pretrained(self.generator_name)
-        self.generator_model.resize_token_embeddings(len(self.generator_tokenizer))
-        #self.generator_linear = torch.nn.Linear(self.generator_config.hidden_size, self.config.vocab_size)
+        self.generator_name = "gpt2"
+        self.generator_path = "/home/sunwangtao/EBKG/generator_file/"
+        self.generator_config = GPT2Config.from_pretrained(self.generator_path)
+        self.generator_tokenizer = GPT2Tokenizer.from_pretrained(self.generator_path)
+        self.generator_model = GPT2LMHeadModel.from_pretrained(self.generator_path)
+        #self.generator_special_tokens_dict = {'cls_token': '[SEP]'}
+        #self.generator_tokenizer.add_special_tokens(self.generator_special_tokens_dict)
+
+        #self.generator_config.save_pretrained(self.generator_path)
+        #self.generator_tokenizer.save_pretrained(self.generator_path)
+        #self.generator_model.save_pretrained(self.generator_path)
+        #self.generator_model.resize_token_embeddings(len(self.generator_tokenizer))
+        #self.generator_model.init_weights()
+        
         #discriminator
-        self.discriminator_name = "bert-base-uncased"#"albert-base-v1"#
-        self.discriminator_config = BertConfig.from_pretrained(self.discriminator_name)
-        self.discriminator_tokenizer = BertTokenizer.from_pretrained(self.discriminator_name)
-        self.discriminator_tokenizer.add_special_tokens(special_tokens_dict)
-        self.discriminator_model = BertModel.from_pretrained(self.discriminator_name)
+        self.discriminator_name = "bert-base-uncased"
+        self.discriminator_path = "/home/sunwangtao/EBKG/discriminator_file/"
+        self.discriminator_config = BertConfig.from_pretrained(self.discriminator_path)
+        self.discriminator_tokenizer = BertTokenizer.from_pretrained(self.discriminator_path)
+        self.discriminator_model = BertModel.from_pretrained(self.discriminator_path)
+
+        self.discriminator_special_tokens_dict = {'bos_token': '<|endoftext|>'}
+        self.discriminator_tokenizer.add_special_tokens(self.discriminator_special_tokens_dict)
         self.discriminator_model.resize_token_embeddings(len(self.discriminator_tokenizer))
         self.discriminator_linear = torch.nn.Linear(self.discriminator_config.hidden_size, 1)
+
+        #self.discriminator_config.save_pretrained(self.discriminator_path)
+        #self.discriminator_tokenizer.save_pretrained(self.discriminator_path)
+        #self.discriminator_model.save_pretrained(self.discriminator_path)
+        
+        #self.discriminator_model.init_weights()
         #initialize
         self.train_mode()
 
@@ -181,41 +183,37 @@ class EnergyBasedKGModel(torch.nn.Module):
         self.generator_model.eval()
         self.discriminator_model.eval()
 
-    def generate(self):
-        sentence = '[CLS]'
-        sample_token = None
-        q = 1
-        for i in range(self.generator_config.vocab_size):
-            if (sample_token == '[PAD]'):
-                break
-            encoded_id = self.generator_tokenizer.encode(sentence, return_tensors="pt")
-            repr_vec = self.get_repr_vec(self.generator_model, encoded_id)[i,:]
+    def generate(self, l, text='<|endoftext|>'):
+        generate_text = text
+        logq = 0
+        indexed_tokens = self.generator_tokenizer.encode(text)
+        tokens_tensor = torch.tensor([indexed_tokens]).cuda(0)
+        for i in range(l):
+            repr_vec = self.get_repr_vec(self.generator_model, tokens_tensor)[-1,:]
             q_distribution = F.softmax(repr_vec)
-            id_sample = self.sample(q_distribution)
-            q *= q_distribution[id_sample]
-            sample_token = self.generator_tokenizer.decode(id_sample)
-            sentence += ' ' + sample_token
-        #sentence = self.generator_tokenizer.decode(sentence)
-        return sentence, q
+            generate_index = self.sample_top_k(repr_vec)
+            #generate_text = self.generator_tokenizer.decode(indexed_tokens + [generate_index])
+            generate_text += ' ' + self.generator_tokenizer.decode(generate_index)
+            indexed_tokens += [generate_index]
+            tokens_tensor = torch.tensor([indexed_tokens]).cuda(0)
+            logq += torch.log(q_distribution[generate_index])
+        generate_text += ' <|endoftext|>'
+        return generate_text, logq
     
-    def generate_q(self, input_tensor):
-        sentence = '[CLS]'
-        q = 1
+    def generate_logq(self, input_tensor):
+        logq = 0
         for i in range(input_tensor.shape[1]):
-            encoded_id = self.generator_tokenizer.encode(sentence, return_tensors="pt")
-            repr_vec = self.get_repr_vec(self.generator_model, encoded_id)[i,:]
+            repr_vec = self.get_repr_vec(self.generator_model, input_tensor[0][0:i+1].view([1,i+1]))[-1,:]
             q_distribution = F.softmax(repr_vec)
-            q *= q_distribution(input_tensor[i])
-            sample_token = self.generator_tokenizer.decode(input_tensor[i])
-            sentence += ' ' + sample_token
-        return q
+            logq += torch.log(q_distribution[input_tensor[0][i]])
+        return logq
 
     def get_repr_vec(self, model, x):
-        model_output = model(x)
-        repr_vec = model_output[0][0,:,:] #1*3*768
+        model_output = model(x)[0]
+        repr_vec = model_output[0,:,:]
         return repr_vec
 
-    def sample(self, q):
+    def sample_prob(self, q):
         rand = random.random()
         q = q.cpu().detach().numpy()
         for i in range(len(q)):
@@ -223,41 +221,61 @@ class EnergyBasedKGModel(torch.nn.Module):
             if (rand <= 0):
                 return i
 
+    def sample_top_k(self, predictions, k=10):
+        predicted_index = random.choice(predictions.sort(descending=True)[1][:k]).item()
+        return predicted_index
+
     def discriminate(self, tensor):
         repr_vec = self.get_repr_vec(self.discriminator_model, tensor)
         E = self.discriminator_linear(repr_vec[0,:])
         p_hat = torch.exp(-E)
         return p_hat
 
-    def forward(self, input_triple):
+    def forward(self, input_triple, l_distribution):
         n = self.config.n
         k = self.config.k
         Pc0 = n/(n+k)
         rand = random.random()
         if (rand < Pc0):
+            input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
+            logq = self.generate_logq(input_tensor)
             input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
             p_hat = self.discriminate(input_tensor)
-            input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
-            q = self.generate_q(input_tensor)
+            q = torch.exp(logq) + 1e-6
             loss = -torch.log(n*p_hat/(n*p_hat+k*q))
         else:
-            input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
-            generate_seq, q = self.generate()
-            generate_tensor = self.discriminator_tokenizer.encode(generate_seq, return_tensors="pt")
+            l = self.sample_prob(l_distribution)
+            generate_seq, logq = self.generate(l)
+            generate_tensor = self.discriminator_tokenizer.encode(generate_seq, return_tensors="pt").cuda(0)
             p_hat = self.discriminate(generate_tensor)
+            q = torch.exp(logq) + 1e-6
             loss = -torch.log(k*q/(n*p_hat+k*q))
         return loss
 
     def triple2tensor(self, tokenizer, triple):
-        text = '[BOS] ' + triple[0] + ' [CLS] ' + triple[1] + ' [CLS] ' + triple[2] + ' [EOS]'
-        seq = tokenizer.encode(text, return_tensors="pt")
+        text = '<|endoftext|> ' + triple[0] + ' <|endoftext|> ' + triple[1] + ' <|endoftext|> ' + triple[2] + ' <|endoftext|>'
+        seq = tokenizer.encode(text, return_tensors="pt").cuda(0)
         return seq
 
-    def train_and_eval(self, trainset, validset):
+    def stat_length(self, trainset):
+        l_distribution = torch.zeros(200)
+        for triple in trainset:
+            seq = self.triple2tensor(self.generator_tokenizer, triple)
+            l = seq.shape[1]
+            l_distribution[l-2] += 1
+        l_distribution /= torch.sum(l_distribution)
+        return l_distribution
+
+    def pretrain_generator(self, tripleDataSet):
+        
+
+    def train_and_eval(self, tripleDataSet):
+        trainset = tripleDataSet.build_train_set()
         self.train_mode()
         optimizer = optim.Adam(self.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
         train_num = len(trainset)
-        
+        l_distribution = self.stat_length(trainset)
+
         for e in range(self.config.epoch):
             random.shuffle(trainset)
             for b in range(train_num // self.config.batchsize):
@@ -265,36 +283,54 @@ class EnergyBasedKGModel(torch.nn.Module):
                 for i in range(self.config.batchsize):
                     triple = trainset[b*self.config.batchsize+i]
                     if (i == 0):
-                        loss = self(triple)
+                        loss = self(triple, l_distribution)
                     else:
-                        loss += self(triple)
+                        loss += self(triple, l_distribution)
 
                 loss.backward()
                 optimizer.step()
-                logging.info("epoch "+str(e)+" step "+str(b)+" loss = "+str(loss.cpu().detach().numpy()[0]))
+                print("epoch "+str(e)+" step "+str(b)+" loss = "+str(loss.cpu().detach().numpy()[0]))
 
-                if (b % 50 == 0):
-                    self.valid(validset)
+                if (b % 1000 == 0):
+                    self.valid(tripleDataSet, l_distribution)
 
-    def valid(self, validset):
+    def valid(self, tripleDataSet, l_distribution):
         #model.module.eval_mode()
-        valid_num = validset.shape[0]
-        permutation = np.random.permutation(valid_num)
-        shuffled_validset = validset[permutation, :]
+        validset = tripleDataSet.build_valid_set()
+        random.shuffle(validset)
         pair = []
-        for i in range(self.config.valid_num):
-            triple = validset[i,:]
-            position = random.randint(0,2)
-            id_true = triple[position]
-            #triple[position] = 0
-            input_triple = torch.tensor(triple).view([1,3])
-            q_h, q_r, q_t = self.generate(input_triple)
-            q = [q_h, q_r, q_t]
-            q_list = q[position].cpu().detach().numpy()
-            id_pred = q_list.argsort()[::-1]
-            pair.append([id_true, id_pred])
-        result = evaluate(pair)
-        logging.info(result)
+        if self.config.task == 'tail enetity prediction':
+            entity_dict = tripleDataSet.build_LUT(tripleDataSet.entity_file)
+            for i in range(self.config.valid_num):
+                triple = validset[i]
+                t_true = triple[2]
+                l = self.sample_prob(l_distribution)
+                text = '<|endoftext|> ' + triple[0] + ' <|endoftext|> ' + triple[1] + ' <|endoftext|> '
+                seq = self.generator_tokenizer.encode(text, return_tensors="pt").cuda(0)
+                l -= seq.shape[1]
+                tail_text = self.generate(l, text=text)[0][len(text):-13]
+                print(tail_text)
+                #pair.append([t_true,t_pred])
+            #result = evaluate(pair)
+            #print(result)
+        if self.config.task == 'relation prediction':
+            relation_dict = tripleDataSet.build_LUT(tripleDataSet.relation_file)
+            for i in range(self.config.valid_num):
+                input_triple = validset[i]
+                r_true = input_triple[1]
+                p_pred = []
+                r_pred = []
+                for r in relation_dict.items():
+                    r = r[1]
+                    input_triple[1] = r
+                    input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
+                    p_hat = self.discriminate(input_tensor).cpu().detach().numpy()[0]
+                    r_pred.append(r)
+                    p_pred.append(p_hat)
+                r_pred = [r_pred for _,r_pred in sorted(zip(p_pred,r_pred),reverse=True)]
+                pair.append([r_true,r_pred])
+            result = evaluate(pair)
+            print(result)
         #model.module.train_mode()
 
 def main():
@@ -303,22 +339,16 @@ def main():
     parser.add_argument("--model-dir", required=True)
     args = parser.parse_args()
     tripleDataSet = TripleDataSet(data_dir=args.data_dir, load=True)
-    trainset = tripleDataSet.build_train_set()
-    validset = tripleDataSet.build_valid_set()
 
-    logging.basicConfig(level=logging.DEBUG,#控制台打印的日志级别
+    logging.basicConfig(level=logging.DEBUG,
                         filename='EBKG.log',
-                        filemode='w',##模式，有w和a，w就是写模式，每次都会重新写日志，覆盖之前的日志
-                        #a是追加模式，默认如果不写的话，就是追加模式
-                        format=
-                        '%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s'
-                        #日志格式
-                        )
+                        filemode='w',
+                        format='%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s')
 
     config = Config()
     ebkgm = EnergyBasedKGModel(config=config)
-
-    ebkgm.train_and_eval(trainset, validset)
+    ebkgm = ebkgm.cuda(0)
+    ebkgm.train_and_eval(tripleDataSet)
     torch.save(ebkgm, os.path.join(args.model_dir,'checkpoint.pt'))
 
     pass
