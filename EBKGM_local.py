@@ -228,8 +228,8 @@ class EnergyBasedKGModel(torch.nn.Module):
     def discriminate(self, tensor):
         repr_vec = self.get_repr_vec(self.discriminator_model, tensor)
         E = self.discriminator_linear(repr_vec[0,:])
-        p_hat = torch.exp(-E)
-        return p_hat
+        #p_hat = torch.exp(-E)
+        return E
 
     def forward(self, input_triple, l_distribution):
         n = self.config.n
@@ -240,16 +240,16 @@ class EnergyBasedKGModel(torch.nn.Module):
             input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
             logq = self.generate_logq(input_tensor)
             input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
-            p_hat = self.discriminate(input_tensor)
-            q = torch.exp(logq) + 1e-6
-            loss = -torch.log(n*p_hat/(n*p_hat+k*q))
+            E = self.discriminate(input_tensor)
+            #loss = -log(n*p_hat/(n*p_hat+k*q)) = -log(1/(1+k/n*q/p_hat)) = -log(1/(1+exp(log(k/n)+log(q)-log(p_hat))))
+            loss = -torch.log(torch.sigmoid(torch.log(n)-torch.log(k)-E-logq))
         else:
             l = self.sample_prob(l_distribution)
             generate_seq, logq = self.generate(l)
             generate_tensor = self.discriminator_tokenizer.encode(generate_seq, return_tensors="pt").cuda(0)
-            p_hat = self.discriminate(generate_tensor)
-            q = torch.exp(logq) + 1e-6
-            loss = -torch.log(k*q/(n*p_hat+k*q))
+            E = self.discriminate(generate_tensor)
+            #loss = -log(k*q/(n*p_hat+k*q)) = -log(1/(1+n/k*p_hat/q)) = -log(1/(1+exp(log(n/k)+log(p_hat)-log(q))))
+            loss = -torch.log(torch.sigmoid(torch.log(k)-torch.log(n)+logq+E))
         return loss
 
     def triple2tensor(self, tokenizer, triple):
@@ -267,7 +267,33 @@ class EnergyBasedKGModel(torch.nn.Module):
         return l_distribution
 
     def pretrain_generator(self, tripleDataSet):
-        
+        trainset = tripleDataSet.build_train_set()
+        self.train_mode()
+        optimizer = optim.Adam(self.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
+        train_num = len(trainset)
+        l_distribution = self.stat_length(trainset)
+
+        for e in range(self.config.epoch):
+            random.shuffle(trainset)
+            for b in range(train_num // self.config.batchsize):
+                optimizer.zero_grad()
+                for i in range(self.config.batchsize):
+                    triple = trainset[b*self.config.batchsize+i]
+                    input_tensor = self.triple2tensor(self.generator_tokenizer, triple)
+                    logq = self.generate_logq(input_tensor)
+                    if (i == 0):
+                        loss = -logq
+                    else:
+                        loss -= logq
+
+                loss.backward()
+                optimizer.step()
+                print("epoch "+str(e)+" step "+str(b)+" loss = "+str(loss.cpu().detach().numpy()))
+
+                if (b % 100 == 0):
+                    for _ in range(10):
+                        l = self.sample_prob(l_distribution)
+                        print(self.generate(l))
 
     def train_and_eval(self, tripleDataSet):
         trainset = tripleDataSet.build_train_set()
@@ -348,7 +374,8 @@ def main():
     config = Config()
     ebkgm = EnergyBasedKGModel(config=config)
     ebkgm = ebkgm.cuda(0)
-    ebkgm.train_and_eval(tripleDataSet)
+    ebkgm.pretrain_generator(tripleDataSet)
+    #ebkgm.train_and_eval(tripleDataSet)
     torch.save(ebkgm, os.path.join(args.model_dir,'checkpoint.pt'))
 
     pass
