@@ -191,19 +191,22 @@ class EnergyBasedKGModel(torch.nn.Module):
         for i in range(l):
             repr_vec = self.get_repr_vec(self.generator_model, tokens_tensor)[-1,:]
             q_distribution = F.softmax(repr_vec)
-            generate_index = self.sample_top_k(repr_vec)
+            #generate_index = self.sample_top_k(repr_vec)
+            generate_index = self.sample_prob(q_distribution)
             #generate_text = self.generator_tokenizer.decode(indexed_tokens + [generate_index])
-            generate_text += ' ' + self.generator_tokenizer.decode(generate_index)
+            generate_text += self.generator_tokenizer.decode(generate_index)
             indexed_tokens += [generate_index]
             tokens_tensor = torch.tensor([indexed_tokens]).cuda(0)
             logq += torch.log(q_distribution[generate_index])
-        generate_text += ' <|endoftext|>'
+            #print(generate_text)
+            #print(tokens_tensor)
+        generate_text += '<|endoftext|>'
         return generate_text, logq
     
     def generate_logq(self, input_tensor):
         logq = 0
-        for i in range(input_tensor.shape[1]):
-            repr_vec = self.get_repr_vec(self.generator_model, input_tensor[0][0:i+1].view([1,i+1]))[-1,:]
+        for i in range(1,input_tensor.shape[1]-1):
+            repr_vec = self.get_repr_vec(self.generator_model, input_tensor[0][0:i].view([1,i]))[-1,:]
             q_distribution = F.softmax(repr_vec)
             logq += torch.log(q_distribution[input_tensor[0][i]])
         return logq
@@ -220,7 +223,12 @@ class EnergyBasedKGModel(torch.nn.Module):
             rand -= q[i]
             if (rand <= 0):
                 return i
-
+        '''
+        a = np.asarray(q)
+        choices = np.prod(a.shape)
+        index = np.random.choice(choices, size=n, p=a.ravel())
+        return np.unravel_index(index, dims=a.shape)
+        '''
     def sample_top_k(self, predictions, k=10):
         predicted_index = random.choice(predictions.sort(descending=True)[1][:k]).item()
         return predicted_index
@@ -293,7 +301,11 @@ class EnergyBasedKGModel(torch.nn.Module):
                 if (b % 100 == 0):
                     for _ in range(10):
                         l = self.sample_prob(l_distribution)
-                        print(self.generate(l))
+                        generate_text, logq1 = self.generate(l)
+                        tensor = self.generator_tokenizer.encode(generate_text, return_tensors="pt").cuda(0)
+                        logq2 = self.generate_logq(tensor)
+                        print(generate_text)
+                        print(logq1,logq2)
 
     def train_and_eval(self, tripleDataSet):
         trainset = tripleDataSet.build_train_set()
