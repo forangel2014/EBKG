@@ -211,15 +211,21 @@ class EnergyBasedKGModel(torch.nn.Module):
     
     def generate_logq(self, input_tensor):
         logq = 0
-        for i in range(1,input_tensor.shape[1]-1):
-            repr_vec = self.get_repr_vec(self.generator_model, input_tensor[0][0:i].view([1,i]))[-1,:]
+        if (input_tensor.dim() == 2):
+            input_tensor = input_tensor[0]
+        for i in range(1, input_tensor.shape[0]-1):
+            if (input_tensor[i].cpu().detach().numpy() == -1):
+                break
+            repr_vec = self.get_repr_vec(self.generator_model, input_tensor[0:i].view([i]))[-1,:]
             q_distribution = F.softmax(repr_vec)
-            logq += torch.log(q_distribution[input_tensor[0][i]])
+            logq += torch.log(q_distribution[input_tensor[i]])
         return logq
 
     def get_repr_vec(self, model, x):
         model_output = model(x)[0]
-        repr_vec = model_output[0,:,:]
+        if (model_output.dim() == 3):
+            model_output = model_output[0]
+        repr_vec = model_output
         return repr_vec
 
     def sample_prob(self, q):
@@ -301,9 +307,17 @@ def train_and_eval(model, tripleDataSet):
         random.shuffle(trainset)
         for b in range(train_num // model.module.config.batchsize):
             optimizer.zero_grad()
-            #triple = trainset[b*model.module.config.batchsize:]
-            data = np.random.randint(0, 10000, [model.module.config.batchsize, 1, 10])
-            input_tensor = torch.tensor(data).cuda(0)
+            triple = trainset[b*model.module.config.batchsize:(b+1)*model.module.config.batchsize]
+            max_len = 0
+            for i in range(model.module.config.batchsize):
+                triple[i] = model.module.triple2tensor(model.module.generator_tokenizer, triple[i])
+                if (len(triple[i][0]) > max_len):
+                    max_len = len(triple[i][0])
+            
+            input_tensor = torch.cat((triple[0], (-torch.ones([1, max_len-len(triple[0][0])])).type_as(triple[0]).cuda(0)), 1)
+            for i in range(1, model.module.config.batchsize):
+                tensor_pad = torch.cat((triple[i], (-torch.ones([1, max_len-len(triple[i][0])])).type_as(triple[0]).cuda(0)), 1)
+                input_tensor = torch.cat((input_tensor, tensor_pad), 0)
             loss = model(input_tensor).sum()
 
             loss.backward()
@@ -371,7 +385,7 @@ def main():
     args = parser.parse_args()
     tripleDataSet = TripleDataSet(data_dir=args.data_dir, load=True)
 
-    config = Config(model_dir=args.model_dir, model_load=False)
+    config = Config(model_dir=args.model_dir, model_load=True)
 
     if config.model_load:
         ebkgm = torch.load(os.path.join(config.model_dir,'checkpoint.pt'))
