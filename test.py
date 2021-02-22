@@ -10,7 +10,7 @@ tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 #special_tokens_dict = {'bos_token': '[BOS]', 'cls_token': '[CLS]', 'eos_token': '[EOS]'}
 #tokenizer.add_special_tokens(special_tokens_dict)
 # 使用 GPT2Tokenizer 对输入进行编码
-text = "<|endoftext|>"
+text = "translate english to chinese: 'I am a student'"
 indexed_tokens = tokenizer.encode(text)
 tokens_tensor = torch.tensor([indexed_tokens])
 tokens_tensor.shape
@@ -26,7 +26,7 @@ model.resize_token_embeddings(len(tokenizer))
 model.eval()
 
 total_predicted_text = text
-n = 1000  # 预测过程的循环次数
+n = 20  # 预测过程的循环次数
 for _ in range(n):
     with torch.no_grad():
         outputs = model(tokens_tensor)
