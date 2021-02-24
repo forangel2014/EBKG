@@ -116,14 +116,14 @@ class Config():
                 model_dir,
                 model_load,
                 vocab_size = 16296,
-                train_method = 'pretrain gpt2',
+                train_method = 'nce',
                 task = 'tail enetity prediction',
                 n = 1,
-                k = 1,
+                k = 5,
                 valid_num = 10,
-                lr = 1e-5,
+                lr = 1e-7,
                 weight_decay = 0,
-                batchsize = 16,
+                batchsize = 4,
                 epoch = 10):
         self.model_dir=model_dir
         self.model_load=model_load
@@ -247,7 +247,7 @@ class EnergyBasedKGModel(torch.nn.Module):
 
     def discriminate(self, tensor):
         repr_vec = self.get_repr_vec(self.discriminator_model, tensor)
-        E = self.discriminator_linear(repr_vec[0,:])
+        E = self.discriminator_linear(repr_vec[0,:])*100
         #p_hat = torch.exp(-E)
         return E
 
@@ -264,13 +264,22 @@ class EnergyBasedKGModel(torch.nn.Module):
             return loss
 
         if (self.config.train_method == 'nce'):
-            loss_data = torch.tensor(0)
-            loss_noise = torch.tensor(0)
+            n = torch.Tensor([self.config.n]).cuda()
+            k = torch.Tensor([self.config.k]).cuda()
+            loss_data = torch.Tensor([0]).cuda()
+            loss_noise = torch.Tensor([0]).cuda()
             for i in range(input_tensor.shape[0]):
                 #input_tensor = self.triple2tensor(self.generator_tokenizer, input_triple)
                 logq = self.generate_logq(input_tensor[i,:])
-                #input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
-                E = self.discriminate(input_tensor[i,:])
+                for j in range(input_tensor.shape[1]):
+                    if (input_tensor[i][j].cpu().detach().numpy() == -1):
+                        original_tensor = input_tensor[i][:j]
+                        break
+                    if (j == input_tensor.shape[1]-1):
+                        original_tensor = input_tensor[i]
+                text = self.generator_tokenizer.decode(original_tensor)
+                d_tensor = self.discriminator_tokenizer.encode(text, return_tensors="pt").cuda()
+                E = self.discriminate(d_tensor)
                 #loss = -log(n*p_hat/(n*p_hat+k*q)) = -log(1/(1+k/n*q/p_hat)) = -log(1/(1+exp(log(k/n)+log(q)-log(p_hat))))
                 loss_data += -torch.log(torch.sigmoid(torch.log(n)-torch.log(k)-E-logq))
             for i in range(int(input_tensor.shape[0]/n*k)):
@@ -314,20 +323,20 @@ def train_and_eval(model, tripleDataSet):
                 if (len(triple[i][0]) > max_len):
                     max_len = len(triple[i][0])
             
-            input_tensor = torch.cat((triple[0], (-torch.ones([1, max_len-len(triple[0][0])])).type_as(triple[0]).cuda(0)), 1)
+            input_tensor = torch.cat((triple[0], (-torch.ones([1, max_len-len(triple[0][0])])).type_as(triple[0]).cuda()), 1)
             for i in range(1, model.module.config.batchsize):
-                tensor_pad = torch.cat((triple[i], (-torch.ones([1, max_len-len(triple[i][0])])).type_as(triple[0]).cuda(0)), 1)
+                tensor_pad = torch.cat((triple[i], (-torch.ones([1, max_len-len(triple[i][0])])).type_as(triple[0]).cuda()), 1)
                 input_tensor = torch.cat((input_tensor, tensor_pad), 0)
             loss = model(input_tensor).sum()
-
-            loss.backward()
-            optimizer.step()
             loss_num = loss.cpu().detach().numpy()
+            if (not np.isinf(loss_num)):
+                loss.backward()
+                optimizer.step()
             print("epoch "+str(e)+" step "+str(b)+" loss = "+str(loss_num))
-            logging.debug(loss_num)
+            #logging.debug(loss_num)
             
-            if (b % 100 == 0):
-                torch.save(model.module, os.path.join(model.module.config.model_dir,'checkpoint.pt'))
+            if (b % 50 == 0 and b > 0):
+                torch.save(model.module, os.path.join(model.module.config.model_dir,model.module.config.train_method+'.pt'))
                 if (model.module.config.train_method == 'pretrain gpt2'):
                     for _ in range(10):
                         l = model.module.sample_prob(model.module.l_distribution)
@@ -337,30 +346,30 @@ def train_and_eval(model, tripleDataSet):
                         print(generate_text)
                         print(logq1.cpu().detach().numpy(),logq2.cpu().detach().numpy())
                 if (model.module.config.train_method == 'nce'):
-                    model.valid(tripleDataSet)
+                    valid(model.module, tripleDataSet)
 
 def valid(model, tripleDataSet):
     #model.module.eval_mode()
     validset = tripleDataSet.build_valid_set()
     random.shuffle(validset)
     pair = []
-    if self.config.task == 'tail enetity prediction':
+    if model.config.task == 'tail enetity prediction':
         entity_dict = tripleDataSet.build_LUT(tripleDataSet.entity_file)
-        for i in range(self.config.valid_num):
+        for i in range(model.config.valid_num):
             triple = validset[i]
             t_true = triple[2]
-            l = self.sample_prob(self.l_distribution)
+            l = model.sample_prob(model.l_distribution)
             text = '<|endoftext|> ' + triple[0] + ' <|endoftext|> ' + triple[1] + ' <|endoftext|> '
-            seq = self.generator_tokenizer.encode(text, return_tensors="pt").cuda()
+            seq = model.generator_tokenizer.encode(text, return_tensors="pt").cuda()
             l -= seq.shape[1]
-            tail_text = self.generate(l, text=text)[0][len(text):-13]
+            tail_text = model.generate(l, text=text)[0][len(text):-13]
             print(tail_text)
             #pair.append([t_true,t_pred])
         #result = evaluate(pair)
         #print(result)
-    if self.config.task == 'relation prediction':
+    if model.config.task == 'relation prediction':
         relation_dict = tripleDataSet.build_LUT(tripleDataSet.relation_file)
-        for i in range(self.config.valid_num):
+        for i in range(model.config.valid_num):
             input_triple = validset[i]
             r_true = input_triple[1]
             p_pred = []
@@ -368,8 +377,8 @@ def valid(model, tripleDataSet):
             for r in relation_dict.items():
                 r = r[1]
                 input_triple[1] = r
-                input_tensor = self.triple2tensor(self.discriminator_tokenizer, input_triple)
-                p_hat = self.discriminate(input_tensor).cpu().detach().numpy()[0]
+                input_tensor = model.triple2tensor(model.discriminator_tokenizer, input_triple)
+                p_hat = model.discriminate(input_tensor).cpu().detach().numpy()[0]
                 r_pred.append(r)
                 p_pred.append(p_hat)
             r_pred = [r_pred for _,r_pred in sorted(zip(p_pred,r_pred),reverse=True)]
@@ -388,7 +397,8 @@ def main():
     config = Config(model_dir=args.model_dir, model_load=True)
 
     if config.model_load:
-        ebkgm = torch.load(os.path.join(config.model_dir,'checkpoint.pt'))
+        ebkgm = torch.load(os.path.join(config.model_dir, config.train_method+'.pt'))
+        ebkgm.config = config
         filemode = 'a'
     else:
         ebkgm = EnergyBasedKGModel(config=config)
@@ -406,7 +416,7 @@ def main():
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         ebkgm = torch.nn.DataParallel(ebkgm)
 
-    ebkgm = ebkgm.cuda(0)
+    ebkgm = ebkgm.cuda()
     train_and_eval(ebkgm, tripleDataSet)
     torch.save(ebkgm, os.path.join(args.model_dir,'checkpoint.pt'))
 
