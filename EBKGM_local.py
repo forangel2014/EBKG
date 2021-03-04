@@ -116,6 +116,7 @@ class Config():
                 model_dir,
                 model_load,
                 vocab_size = 16296,
+                dataset_name = 'wikidata5m',
                 train_method = 'nce',
                 task = 'tail enetity prediction',
                 n = 1,
@@ -125,9 +126,10 @@ class Config():
                 weight_decay = 0,
                 batchsize = 4,
                 epoch = 10):
-        self.model_dir=model_dir
-        self.model_load=model_load
-        self.vocab_size=vocab_size
+        self.model_dir = model_dir
+        self.model_load = model_load
+        self.vocab_size = vocab_size
+        self.dataset_name = dataset_name
         self.train_method = train_method
         self.task = task
         self.n = n
@@ -194,19 +196,32 @@ class EnergyBasedKGModel(torch.nn.Module):
         logq = 0
         indexed_tokens = self.generator_tokenizer.encode(text)
         tokens_tensor = torch.tensor([indexed_tokens]).cuda()
-        for i in range(l):
-            repr_vec = self.get_repr_vec(self.generator_model, tokens_tensor)[-1,:]
-            q_distribution = F.softmax(repr_vec)
-            #generate_index = self.sample_top_k(repr_vec)
-            generate_index = self.sample_prob(q_distribution)
-            #generate_text = self.generator_tokenizer.decode(indexed_tokens + [generate_index])
-            generate_text += self.generator_tokenizer.decode(generate_index)
-            indexed_tokens += [generate_index]
-            tokens_tensor = torch.tensor([indexed_tokens]).cuda()
-            logq += torch.log(q_distribution[generate_index])
-            #print(generate_text)
-            #print(tokens_tensor)
-        generate_text += '<|endoftext|>'
+        if (l > 0):
+            for i in range(l):
+                repr_vec = self.get_repr_vec(self.generator_model, tokens_tensor)[-1,:]
+                q_distribution = F.softmax(repr_vec)
+                #generate_index = self.sample_top_k(repr_vec)
+                generate_index = self.sample_prob(q_distribution)
+                #generate_text = self.generator_tokenizer.decode(indexed_tokens + [generate_index])
+                generate_text += self.generator_tokenizer.decode(generate_index)
+                indexed_tokens += [generate_index]
+                tokens_tensor = torch.tensor([indexed_tokens]).cuda()
+                logq += torch.log(q_distribution[generate_index])
+                #print(generate_text)
+                #print(tokens_tensor)
+            generate_text += '<|endoftext|>'
+        else:
+            next_text = None
+            while (next_text != '<|endoftext|>'):
+                repr_vec = self.get_repr_vec(self.generator_model, tokens_tensor)[-1,:]
+                q_distribution = F.softmax(repr_vec)
+                #generate_index = self.sample_top_k(repr_vec)
+                generate_index = self.sample_prob(q_distribution)
+                next_text = self.generator_tokenizer.decode(generate_index)
+                generate_text += next_text
+                indexed_tokens += [generate_index]
+                tokens_tensor = torch.tensor([indexed_tokens]).cuda()
+                logq += torch.log(q_distribution[generate_index])
         return generate_text, logq
     
     def generate_logq(self, input_tensor):
@@ -247,7 +262,7 @@ class EnergyBasedKGModel(torch.nn.Module):
 
     def discriminate(self, tensor):
         repr_vec = self.get_repr_vec(self.discriminator_model, tensor)
-        E = self.discriminator_linear(repr_vec[0,:])*100
+        E = self.discriminator_linear(repr_vec[0,:])*200
         #p_hat = torch.exp(-E)
         return E
 
@@ -261,6 +276,7 @@ class EnergyBasedKGModel(torch.nn.Module):
                     loss = -logq
                 else:
                     loss -= logq
+            logging.debug(loss.cpu().detach().numpy())
             return loss
 
         if (self.config.train_method == 'nce'):
@@ -290,6 +306,8 @@ class EnergyBasedKGModel(torch.nn.Module):
                 #loss = -log(k*q/(n*p_hat+k*q)) = -log(1/(1+n/k*p_hat/q)) = -log(1/(1+exp(log(n/k)+log(p_hat)-log(q))))
                 loss_noise += -torch.log(torch.sigmoid(torch.log(k)-torch.log(n)+logq+E))
             loss = loss_data + loss_noise
+            logging.debug("loss_data:"+str(loss_data.cpu().detach().numpy()))
+            logging.debug("loss_noise:"+str(loss_noise.cpu().detach().numpy()))
             return loss
 
     def triple2tensor(self, tokenizer, triple):
@@ -305,8 +323,24 @@ class EnergyBasedKGModel(torch.nn.Module):
             self.l_distribution[l-2] += 1
         self.l_distribution /= torch.sum(self.l_distribution)
 
+    def call_ppl(self, trainset):
+        with torch.no_grad():
+            Nt = 0
+            logp = torch.Tensor([0])
+            random.shuffle(trainset)
+            for i in range(1000):
+                tensor = self.triple2tensor(self.generator_tokenizer, trainset[i])
+                Nt += tensor.shape[1]
+                logp += self.generate_logq(tensor)
+        logp = logp.cpu().detach().numpy()
+        ppl = np.exp(-logp/Nt)
+        return ppl
+
 def train_and_eval(model, tripleDataSet):
     trainset = tripleDataSet.build_train_set()
+    validset = tripleDataSet.build_valid_set()
+    #print(model.module.call_ppl(trainset))
+    #print(model.module.call_ppl(validset))
     model.module.train_mode()
     optimizer = optim.Adam(model.module.parameters(), lr=model.module.config.lr, weight_decay=model.module.config.weight_decay)
     train_num = len(trainset)
@@ -333,11 +367,11 @@ def train_and_eval(model, tripleDataSet):
                 loss.backward()
                 optimizer.step()
             print("epoch "+str(e)+" step "+str(b)+" loss = "+str(loss_num))
-            #logging.debug(loss_num)
             
+            config = model.module.config
             if (b % 50 == 0 and b > 0):
-                torch.save(model.module, os.path.join(model.module.config.model_dir,model.module.config.train_method+'.pt'))
-                if (model.module.config.train_method == 'pretrain gpt2'):
+                torch.save(model.module, os.path.join(config.model_dir,config.dataset_name+'_'+config.train_method+'.pt'))
+                if (config.train_method == 'pretrain gpt2'):
                     for _ in range(10):
                         l = model.module.sample_prob(model.module.l_distribution)
                         generate_text, logq1 = model.module.generate(l)
@@ -345,7 +379,7 @@ def train_and_eval(model, tripleDataSet):
                         logq2 = model.module.generate_logq(tensor)
                         print(generate_text)
                         print(logq1.cpu().detach().numpy(),logq2.cpu().detach().numpy())
-                if (model.module.config.train_method == 'nce'):
+                if (config.train_method == 'nce'):
                     valid(model.module, tripleDataSet)
 
 def valid(model, tripleDataSet):
@@ -358,15 +392,14 @@ def valid(model, tripleDataSet):
         for i in range(model.config.valid_num):
             triple = validset[i]
             t_true = triple[2]
-            l = model.sample_prob(model.l_distribution)
+            #l = model.sample_prob(model.l_distribution)
             text = '<|endoftext|> ' + triple[0] + ' <|endoftext|> ' + triple[1] + ' <|endoftext|> '
             seq = model.generator_tokenizer.encode(text, return_tensors="pt").cuda()
-            l -= seq.shape[1]
-            tail_text = model.generate(l, text=text)[0][len(text):-13]
+            tail_text = model.generate(0, text=text)[0][len(text):-13]
             print(tail_text)
-            #pair.append([t_true,t_pred])
-        #result = evaluate(pair)
-        #print(result)
+            pair.append([t_true,tail_text])
+        result = evaluate(pair, entity_dict)
+        print(result)
     if model.config.task == 'relation prediction':
         relation_dict = tripleDataSet.build_LUT(tripleDataSet.relation_file)
         for i in range(model.config.valid_num):
@@ -397,7 +430,8 @@ def main():
     config = Config(model_dir=args.model_dir, model_load=True)
 
     if config.model_load:
-        ebkgm = torch.load(os.path.join(config.model_dir, config.train_method+'.pt'))
+        #ebkgm = torch.load(os.path.join(config.model_dir, config.dataset_name+'_'+config.train_method+'.pt'))
+        ebkgm = torch.load(os.path.join(config.model_dir, 'wikidata5m_pretrain gpt2.pt'))
         ebkgm.config = config
         filemode = 'a'
     else:
@@ -405,7 +439,7 @@ def main():
         filemode = 'w'
 
     logging.basicConfig(level=logging.DEBUG,
-                        filename='EBKG.log',
+                        filename=config.dataset_name+'_'+config.train_method+'_loss.log',
                         filemode=filemode,
                         format='')
 
@@ -417,11 +451,8 @@ def main():
         ebkgm = torch.nn.DataParallel(ebkgm)
 
     ebkgm = ebkgm.cuda()
-    train_and_eval(ebkgm, tripleDataSet)
-    torch.save(ebkgm, os.path.join(args.model_dir,'checkpoint.pt'))
-
-
-    pass
+    #train_and_eval(ebkgm, tripleDataSet)
+    valid(ebkgm.module, tripleDataSet)
 
 if __name__ == "__main__":
     main()
